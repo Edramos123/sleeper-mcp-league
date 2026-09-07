@@ -13,4 +13,3 @@ services:
       - key: SLEEPER_LEAGUE_ID
         value: "1315471209655181312"
     autoDeploy: true
-    healthCheckPath: /health
