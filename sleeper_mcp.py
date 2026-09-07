@@ -65,6 +65,10 @@ logfire.instrument_httpx()
 LEAGUE_ID = os.environ.get("SLEEPER_LEAGUE_ID", "1266471057523490816")
 logger.info(f"Initializing Token Bowl MCP Server with league_id={LEAGUE_ID}")
 
+# Optional: your Sleeper user_id, used by get_my_roster() to find your roster
+# in a league without needing to know its roster_id.
+SLEEPER_USER_ID = os.environ.get("SLEEPER_USER_ID")
+
 
 def _load_league_name_map() -> Dict[str, str]:
     """Parse SLEEPER_LEAGUES into a {friendly name (lowercase): league_id} map.
@@ -174,9 +178,10 @@ async def list_configured_leagues() -> Dict[str, Any]:
 
     Reads the friendly-name -> league_id map from the SLEEPER_LEAGUES env
     var (e.g. {"tejas": "1315471209655181312", "work": "...", "family": "..."})
-    and looks up each league's current name, season, and team count from the
-    Sleeper API, so you know which league_id or friendly name to pass to the
-    other tools (get_roster, get_league_info, get_waiver_wire_players, etc.).
+    and looks up each league's current name, season, team count, and scoring
+    type from the Sleeper API, so you know which league_id or friendly name
+    to pass to the other tools (get_roster, get_league_info,
+    get_waiver_wire_players, etc.).
 
     If SLEEPER_LEAGUES is unset or invalid, this returns an empty leagues
     list rather than erroring - the server still works for the single
@@ -187,11 +192,22 @@ async def list_configured_leagues() -> Dict[str, Any]:
         - default_league_id: the SLEEPER_LEAGUE_ID used when a tool call
           omits league_id
         - leagues: list of {name, league_id, sleeper_name, season,
-          team_count, is_default} for each entry in SLEEPER_LEAGUES.
-          sleeper_name/season/team_count are None and an "error" key is
-          present for any league_id the Sleeper API couldn't look up.
+          team_count, scoring_type, is_default} for each entry in
+          SLEEPER_LEAGUES. sleeper_name/season/team_count/scoring_type are
+          None and an "error" key is present for any league_id the Sleeper
+          API couldn't look up.
     """
     from lib.league_tools import fetch_league_info
+
+    def _scoring_type(info: Dict[str, Any]) -> str:
+        points_per_reception = info.get("scoring_settings", {}).get("rec", 0) or 0
+        if points_per_reception == 1:
+            return "PPR"
+        if points_per_reception == 0.5:
+            return "Half-PPR"
+        if points_per_reception == 0:
+            return "Standard"
+        return f"{points_per_reception} points/reception"
 
     async def _describe(name: str, league_id: str) -> Dict[str, Any]:
         entry = {
@@ -200,6 +216,7 @@ async def list_configured_leagues() -> Dict[str, Any]:
             "sleeper_name": None,
             "season": None,
             "team_count": None,
+            "scoring_type": None,
             "is_default": league_id == LEAGUE_ID,
         }
         try:
@@ -207,6 +224,7 @@ async def list_configured_leagues() -> Dict[str, Any]:
             entry["sleeper_name"] = info.get("name")
             entry["season"] = info.get("season")
             entry["team_count"] = info.get("total_rosters")
+            entry["scoring_type"] = _scoring_type(info)
         except Exception as e:
             logger.warning(
                 f"Could not look up configured league (name={name}, "
@@ -324,6 +342,73 @@ async def get_roster(roster_id: int, league_id: Optional[str] = None) -> Dict[st
 
     return await fetch_roster_with_enrichment(
         roster_id, resolve_league_id(league_id), BASE_URL
+    )
+
+
+@mcp.tool()
+@log_mcp_tool
+async def get_my_roster(league_id: Optional[str] = None) -> Dict[str, Any]:
+    """Get your own roster in a league, without needing to know its roster_id.
+
+    Looks up the league's rosters and returns whichever one's owner_id
+    matches the SLEEPER_USER_ID env var - useful across multiple leagues
+    where your roster_id differs from league to league.
+
+    Args:
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
+
+    Returns the same comprehensive roster data as get_roster():
+    - Team information (owner, record, points)
+    - Full player details for all rostered players
+    - Current week projections and scoring
+    - Organized into starters, bench, taxi, and IR
+    - Useful meta information (projected points for starters, bench points, etc.)
+
+    Returns:
+        Dict with roster info and enriched player data, or an error dict if
+        SLEEPER_USER_ID isn't configured or owns no roster in this league.
+    """
+    if not SLEEPER_USER_ID:
+        return create_error_response(
+            "SLEEPER_USER_ID is not configured on this server.",
+            expected="Set the SLEEPER_USER_ID env var to your Sleeper user_id.",
+        )
+
+    from lib.league_tools import fetch_league_rosters, fetch_roster_with_enrichment
+
+    resolved_league_id = resolve_league_id(league_id)
+
+    try:
+        rosters = await fetch_league_rosters(resolved_league_id, BASE_URL)
+    except Exception as e:
+        logger.error(
+            f"Failed to fetch rosters for get_my_roster (league_id={resolved_league_id}, "
+            f"error_type={type(e).__name__}, error_message={str(e)})",
+            exc_info=True,
+        )
+        return create_error_response(
+            f"Failed to fetch rosters: {str(e)}", league_id=resolved_league_id
+        )
+
+    my_roster = next(
+        (r for r in rosters if str(r.get("owner_id")) == str(SLEEPER_USER_ID)),
+        None,
+    )
+    if my_roster is None:
+        logger.error(
+            f"No roster owned by SLEEPER_USER_ID in league (league_id={resolved_league_id}, "
+            f"user_id={SLEEPER_USER_ID})"
+        )
+        return create_error_response(
+            "No roster in this league is owned by SLEEPER_USER_ID.",
+            league_id=resolved_league_id,
+            user_id=SLEEPER_USER_ID,
+        )
+
+    return await fetch_roster_with_enrichment(
+        my_roster.get("roster_id"), resolved_league_id, BASE_URL
     )
 
 

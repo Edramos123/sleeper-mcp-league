@@ -71,6 +71,7 @@ These are located in .env
 - `FFNERD_API_KEY`: Fantasy Nerds API key for extended analytics
 - `SLEEPER_LEAGUE_ID`: Default Sleeper league ID, used when a tool call omits its optional `league_id` argument (defaults to Token Bowl: 1266471057523490816)
 - `SLEEPER_LEAGUES`: Optional JSON object mapping friendly names to Sleeper league IDs (e.g. `{"tejas": "...", "work": "..."}`), so tool calls can pass a name instead of a raw ID. See `list_configured_leagues`.
+- `SLEEPER_USER_ID`: Optional Sleeper user_id, used by `get_my_roster` to find your roster in any configured league by matching it against each roster's `owner_id`.
 - `REDIS_URL`: Redis connection URL (defaults to redis://localhost:6379)
 wy
 ### GitHub
