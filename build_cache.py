@@ -7,20 +7,75 @@ This replaces the existing cache with enriched Sleeper + Fantasy Nerds data.
 import json
 import gzip
 import httpx
-import redis
 import os
 from typing import Dict, Any, List
 from datetime import datetime
 from dotenv import load_dotenv
+from cache_backend import get_cache_client
 
 # Load environment variables
 load_dotenv()
 
+# Positions we actually use downstream. Sleeper's /v1/players/nfl payload
+# includes every player it has ever tracked (IDP positions, practice squad,
+# retired players, etc.) - tens of thousands of entries. Filtering to this
+# set immediately after fetch keeps peak memory manageable on a 512MB
+# instance; enrich_and_filter_players() would discard the rest anyway.
+FANTASY_POSITIONS = {"QB", "RB", "WR", "TE", "K", "DEF"}
 
-def get_redis_client() -> redis.Redis:
-    """Get Redis client connection."""
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-    return redis.from_url(redis_url, decode_responses=False)
+
+def get_redis_client():
+    """Get the cache client (real Redis, or an in-memory fallback if Redis
+    is unreachable or REDIS_URL is unset)."""
+    return get_cache_client()
+
+
+def validate_json_response(data: Any, expected_type: type, endpoint: str) -> None:
+    """Validate that a parsed JSON response has the expected shape.
+
+    Sleeper's API occasionally returns an unexpected payload (e.g. a plain
+    string error/rate-limit message) instead of the documented dict/list
+    shape. Iterating over that as-is produces a confusing
+    "'str' object has no attribute 'get'/'items'" error deep in unrelated
+    code. Catch it here instead, with enough of the raw response logged to
+    make the failure diagnosable.
+    """
+    if not isinstance(data, expected_type):
+        snippet = repr(str(data)[:500])
+        print(
+            f"Unexpected response shape from {endpoint}: expected "
+            f"{expected_type.__name__}, got {type(data).__name__}. "
+            f"First 500 chars of response: {snippet}"
+        )
+        raise ValueError(
+            f"{endpoint} returned unexpected type {type(data).__name__}, "
+            f"expected {expected_type.__name__}"
+        )
+
+
+def filter_to_fantasy_positions(sleeper_players: Dict) -> Dict:
+    """Drop non-fantasy-position players and any malformed entries.
+
+    Also guards against individual player entries that aren't dicts (e.g. a
+    stray string) reaching code further down that calls .get()/.items() on
+    them.
+    """
+    filtered = {}
+    skipped_malformed = 0
+    for player_id, player in sleeper_players.items():
+        if not isinstance(player, dict):
+            skipped_malformed += 1
+            continue
+        if player.get("position") in FANTASY_POSITIONS:
+            filtered[player_id] = player
+
+    if skipped_malformed:
+        print(
+            f"Warning: skipped {skipped_malformed} malformed player entries "
+            "(not a dict) from Sleeper players response"
+        )
+
+    return filtered
 
 
 def normalize_name(name: str) -> str:
@@ -38,7 +93,9 @@ def fetch_sleeper_players() -> Dict[str, Any]:
     with httpx.Client(timeout=30.0) as client:
         response = client.get(url)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        validate_json_response(data, dict, "Sleeper players endpoint (/v1/players/nfl)")
+        return data
 
 
 def fetch_current_nfl_week() -> tuple[int, str]:
@@ -50,6 +107,7 @@ def fetch_current_nfl_week() -> tuple[int, str]:
         response = client.get(url)
         response.raise_for_status()
         state = response.json()
+        validate_json_response(state, dict, "Sleeper state endpoint (/v1/state/nfl)")
         return state.get("week", 1), state.get("season", "2025")
 
 
@@ -61,7 +119,13 @@ def fetch_player_stats(week: int, season: str) -> Dict[str, Any]:
     with httpx.Client(timeout=30.0) as client:
         response = client.get(url)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        validate_json_response(
+            data,
+            dict,
+            f"Sleeper stats endpoint (/v1/stats/nfl/regular/{season}/{week})",
+        )
+        return data
 
 
 def filter_ppr_relevant_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
@@ -518,8 +582,20 @@ def organize_ffnerd_data(
                         "position": injury.get("position"),
                     }
 
-    # Process news
+    # Process news. The Fantasy Nerds news endpoint returns a dict (e.g. an
+    # error payload) instead of a list when the API key is missing/invalid;
+    # iterating a dict yields its string keys, and calling .get() on those
+    # produces a confusing "'str' object has no attribute 'get'" crash.
+    if not isinstance(news, list):
+        print(
+            f"Warning: Fantasy Nerds news response was {type(news).__name__}, "
+            f"expected list. First 500 chars: {str(news)[:500]!r}. Skipping news processing."
+        )
+        news = []
+
     for article in news:
+        if not isinstance(article, dict):
+            continue
         player_ids = article.get("playerIds", [])
         for pid in player_ids:
             player_id = str(pid)
@@ -837,6 +913,15 @@ def cache_players():
 
         # Fetch all data
         sleeper_players = fetch_sleeper_players()
+        print(f"Fetched {len(sleeper_players)} total players from Sleeper")
+
+        # Drop non-fantasy positions immediately - keeps the raw ~10k+ entry
+        # payload from sitting in memory for the rest of this run (512MB instance)
+        sleeper_players = filter_to_fantasy_positions(sleeper_players)
+        print(
+            f"Filtered to {len(sleeper_players)} fantasy-position players (QB/RB/WR/TE/K/DEF)"
+        )
+
         ffnerd_players = fetch_fantasy_nerds_players()
         rankings, injuries, news = fetch_fantasy_nerds_data()
         ros = fetch_fantasy_nerds_ros()  # Fetch ROS projections
@@ -849,6 +934,7 @@ def cache_players():
         # Filter to only PPR-relevant stats
         stats_data = filter_ppr_relevant_stats(raw_stats)
         print(f"Filtered to {len(stats_data)} players with PPR-relevant stats")
+        del raw_stats
 
         # Create ID mappings
         mapping = create_player_mappings(sleeper_players, ffnerd_players)
@@ -862,6 +948,12 @@ def cache_players():
         players = enrich_and_filter_players(
             sleeper_players, mapping, ffnerd_data, stats_data, bye_weeks_map
         )
+
+        # Free the raw/intermediate data now that everything we need has
+        # been folded into `players` - avoids holding several large dicts
+        # in memory at once alongside the final JSON encode/compress step
+        del sleeper_players, ffnerd_players, mapping, ffnerd_data, stats_data
+        del rankings, injuries, news, ros
 
         print(f"Total fantasy-relevant players: {len(players)}")
 

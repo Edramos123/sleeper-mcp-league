@@ -835,7 +835,19 @@ async def get_player_by_sleeper_id(player_id: str) -> Optional[Dict[str, Any]]:
         # Run sync function in executor to get updated data
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, get_player_by_id, player_id)
-        return result if result else None
+        if result:
+            return result
+
+        # get_player_by_id() returns None both when the player isn't in the
+        # cache and when the cache itself is unavailable. Distinguish those
+        # so a cache outage doesn't look like a silent "not found".
+        cache_snapshot = await loop.run_in_executor(None, get_players_from_cache, False)
+        if cache_snapshot is None:
+            return create_error_response(
+                "Player cache is unavailable. Try again later.",
+                player_id=player_id,
+            )
+        return None
     except Exception as e:
         logger.error(
             f"Failed to get player by ID (player_id={player_id}, error_type={type(e).__name__}, "
@@ -931,6 +943,14 @@ async def get_trending_players(
 
     # Get cached player data for enrichment
     all_players = get_players_from_cache(active_only=False)
+    if all_players is None:
+        logger.error("Player cache is unavailable; cannot enrich trending players")
+        return [
+            create_error_response(
+                "Player cache is unavailable. Trending player data cannot be "
+                "enriched right now; try again later."
+            )
+        ]
 
     # Enrich trending data with full player information
     enriched_trending = []
@@ -1019,6 +1039,14 @@ async def get_player_stats_all_weeks(
         # Get player info from cache first
         player_data = get_player_by_id(player_id)
         if not player_data:
+            # get_player_by_id() returns None both for "not in cache" and
+            # "cache unavailable" - check which one this is so the message
+            # is accurate instead of implying the player doesn't exist.
+            if get_players_from_cache(active_only=False) is None:
+                return {
+                    "error": "Player cache is unavailable. Try again later.",
+                    "player_id": player_id,
+                }
             return {
                 "error": f"Player with ID {player_id} not found",
                 "player_id": player_id,
@@ -1245,6 +1273,14 @@ async def get_waiver_wire_players(
 
         # Get all NFL players from cache (sync function, don't await)
         all_players = get_players_from_cache(active_only=False)
+        if all_players is None:
+            return create_error_response(
+                "Player cache is unavailable. The waiver wire cannot be "
+                "computed without player data; try again later.",
+                total_available=0,
+                filtered_count=0,
+                players=[],
+            )
 
         # Fetch trending data and recent drops using utility functions
         trending_data = await get_trending_data_map(
@@ -1448,8 +1484,10 @@ async def get_waiver_analysis(
             # Collect unique recently dropped players
             dropped_player_ids = set()
 
-            # Get player data from cache to enrich drops with projections
-            all_players = get_players_from_cache(active_only=False)
+            # Get player data from cache to enrich drops with projections.
+            # Fall back to {} rather than None - a cache outage should mean
+            # "no projections attached to drops", not a crash here.
+            all_players = get_players_from_cache(active_only=False) or {}
 
             for txn in recent_transactions:
                 if txn.get("drops"):

@@ -6,12 +6,11 @@ Provides automatic refresh on cache miss/expiry.
 
 import json
 import gzip
-import redis
-import os
 import logging
 from typing import Dict, Any, Optional, Set
 from datetime import datetime
-from build_cache import cache_players
+from build_cache import cache_players, validate_json_response
+from cache_backend import get_cache_client
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -21,10 +20,10 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-def get_redis_client() -> redis.Redis:
-    """Get Redis client connection."""
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-    return redis.from_url(redis_url, decode_responses=False)
+def get_redis_client():
+    """Get the cache client (real Redis, or an in-memory fallback if Redis
+    is unreachable or REDIS_URL is unset)."""
+    return get_cache_client()
 
 
 def get_players_from_cache(active_only: bool = True) -> Optional[Dict[str, Any]]:
@@ -241,6 +240,11 @@ def spot_refresh_player_stats(player_ids: Optional[Set[str]] = None) -> bool:
             stats_resp = client.get(stats_url)
             stats_resp.raise_for_status()
             raw_stats = stats_resp.json()
+            validate_json_response(
+                raw_stats,
+                dict,
+                f"Sleeper stats endpoint (/v1/stats/nfl/regular/{season}/{current_week})",
+            )
 
         # Filter to PPR-relevant stats using the same logic as build_cache
         filtered_stats = filter_ppr_relevant_stats(raw_stats)
