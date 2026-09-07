@@ -2,6 +2,7 @@
 """Token Bowl MCP Server - Fantasy football league management via Sleeper API"""
 
 import httpx
+import json
 import os
 import logging
 import asyncio
@@ -64,6 +65,71 @@ logfire.instrument_httpx()
 LEAGUE_ID = os.environ.get("SLEEPER_LEAGUE_ID", "1266471057523490816")
 logger.info(f"Initializing Token Bowl MCP Server with league_id={LEAGUE_ID}")
 
+
+def _load_league_name_map() -> Dict[str, str]:
+    """Parse SLEEPER_LEAGUES into a {friendly name (lowercase): league_id} map.
+
+    SLEEPER_LEAGUES is optional - a JSON object like
+    {"tejas": "1315471209655181312", "work": "..."}. Missing or malformed
+    JSON degrades to an empty map (with a logged error) rather than
+    crashing the server at import time.
+    """
+    raw = os.environ.get("SLEEPER_LEAGUES")
+    if not raw:
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error(
+            f"SLEEPER_LEAGUES is not valid JSON ({e}); ignoring it. "
+            f"First 500 chars: {raw[:500]!r}"
+        )
+        return {}
+
+    if not isinstance(parsed, dict):
+        logger.error(
+            "SLEEPER_LEAGUES must be a JSON object mapping names to league "
+            f"IDs, got {type(parsed).__name__}; ignoring it."
+        )
+        return {}
+
+    name_map = {}
+    for name, value in parsed.items():
+        if not isinstance(name, str) or not isinstance(value, (str, int)):
+            logger.warning(
+                f"Skipping invalid SLEEPER_LEAGUES entry: {name!r} -> {value!r}"
+            )
+            continue
+        name_map[name.lower()] = str(value)
+
+    return name_map
+
+
+# Friendly-name -> league_id map, loaded once at startup from SLEEPER_LEAGUES
+LEAGUE_NAME_MAP = _load_league_name_map()
+if LEAGUE_NAME_MAP:
+    logger.info(
+        f"Loaded {len(LEAGUE_NAME_MAP)} named league(s) from SLEEPER_LEAGUES: "
+        f"{sorted(LEAGUE_NAME_MAP)}"
+    )
+
+
+def resolve_league_id(league_id: Optional[str] = None) -> str:
+    """Resolve a tool's optional league_id argument to a concrete Sleeper league ID.
+
+    - None or empty -> falls back to SLEEPER_LEAGUE_ID (today's single-league default)
+    - a friendly name configured in SLEEPER_LEAGUES (case-insensitive) -> its league ID
+    - anything else -> returned as-is (assumed to already be a raw Sleeper league ID)
+    """
+    if league_id is None:
+        return LEAGUE_ID
+    league_id = str(league_id).strip()
+    if not league_id:
+        return LEAGUE_ID
+    return LEAGUE_NAME_MAP.get(league_id.lower(), league_id)
+
+
 # Initialize FastMCP server
 mcp = FastMCP("tokenbowl-mcp")
 
@@ -78,8 +144,8 @@ BASE_URL = "https://api.sleeper.app/v1"
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_info() -> Dict[str, Any]:
-    """Get comprehensive information about the Token Bowl fantasy football league.
+async def get_league_info(league_id: Optional[str] = None) -> Dict[str, Any]:
+    """Get comprehensive information about a fantasy football league.
 
     Returns detailed league settings including:
     - League name, season, and current status
@@ -87,26 +153,94 @@ async def get_league_info() -> Dict[str, Any]:
     - Scoring settings and rules
     - Playoff configuration and schedule
     - Draft settings and keeper rules
-    - League ID: Configured via SLEEPER_LEAGUE_ID env var (default: 1266471057523490816)
+
+    Args:
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns:
         Dict containing all league configuration and settings
     """
     from lib.league_tools import fetch_league_info
 
-    return await fetch_league_info(LEAGUE_ID, BASE_URL)
+    return await fetch_league_info(resolve_league_id(league_id), BASE_URL)
 
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_rosters(include_details: bool = False) -> List[Dict[str, Any]]:
-    """Get all team rosters in the Token Bowl league with player assignments.
+async def list_configured_leagues() -> Dict[str, Any]:
+    """List the fantasy football leagues configured for this server.
+
+    Reads the friendly-name -> league_id map from the SLEEPER_LEAGUES env
+    var (e.g. {"tejas": "1315471209655181312", "work": "...", "family": "..."})
+    and looks up each league's current name, season, and team count from the
+    Sleeper API, so you know which league_id or friendly name to pass to the
+    other tools (get_roster, get_league_info, get_waiver_wire_players, etc.).
+
+    If SLEEPER_LEAGUES is unset or invalid, this returns an empty leagues
+    list rather than erroring - the server still works for the single
+    default league in that case.
+
+    Returns:
+        Dict with:
+        - default_league_id: the SLEEPER_LEAGUE_ID used when a tool call
+          omits league_id
+        - leagues: list of {name, league_id, sleeper_name, season,
+          team_count, is_default} for each entry in SLEEPER_LEAGUES.
+          sleeper_name/season/team_count are None and an "error" key is
+          present for any league_id the Sleeper API couldn't look up.
+    """
+    from lib.league_tools import fetch_league_info
+
+    async def _describe(name: str, league_id: str) -> Dict[str, Any]:
+        entry = {
+            "name": name,
+            "league_id": league_id,
+            "sleeper_name": None,
+            "season": None,
+            "team_count": None,
+            "is_default": league_id == LEAGUE_ID,
+        }
+        try:
+            info = await fetch_league_info(league_id, BASE_URL)
+            entry["sleeper_name"] = info.get("name")
+            entry["season"] = info.get("season")
+            entry["team_count"] = info.get("total_rosters")
+        except Exception as e:
+            logger.warning(
+                f"Could not look up configured league (name={name}, "
+                f"league_id={league_id}, error_type={type(e).__name__}, "
+                f"error_message={str(e)})"
+            )
+            entry["error"] = f"Failed to fetch league from Sleeper: {str(e)}"
+        return entry
+
+    leagues = await asyncio.gather(
+        *(_describe(name, league_id) for name, league_id in LEAGUE_NAME_MAP.items())
+    )
+
+    return {
+        "default_league_id": LEAGUE_ID,
+        "leagues": list(leagues),
+    }
+
+
+@mcp.tool()
+@log_mcp_tool
+async def get_league_rosters(
+    include_details: bool = False, league_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get all team rosters in a fantasy football league with player assignments.
 
     Args:
         include_details: If True, include full player ID arrays and all roster details.
                         If False, return only summary info (default).
                         Summary includes: roster_id, owner_id, wins, losses, ties,
                         points_for, points_against, waiver_position.
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns roster information for each team.
 
@@ -128,7 +262,7 @@ async def get_league_rosters(include_details: bool = False) -> List[Dict[str, An
     """
     from lib.league_tools import fetch_league_rosters
 
-    rosters = await fetch_league_rosters(LEAGUE_ID, BASE_URL)
+    rosters = await fetch_league_rosters(resolve_league_id(league_id), BASE_URL)
 
     if not include_details:
         # Return minimal roster info (reduces ~600 tokens)
@@ -154,13 +288,16 @@ async def get_league_rosters(include_details: bool = False) -> List[Dict[str, An
 
 @mcp.tool()
 @log_mcp_tool
-async def get_roster(roster_id: int) -> Dict[str, Any]:
+async def get_roster(roster_id: int, league_id: Optional[str] = None) -> Dict[str, Any]:
     """Get detailed roster information with full player data for a specific team.
 
     Args:
         roster_id: The roster ID (1-10) for the team you want to view.
               Can be an integer or string (will be converted).
               Valid range: 1-10. Roster ID 2 is Bill Beliclaude.
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns a comprehensive roster including:
     - Team information (owner, record, points)
@@ -185,13 +322,20 @@ async def get_roster(roster_id: int) -> Dict[str, Any]:
             expected="integer between 1 and 10",
         )
 
-    return await fetch_roster_with_enrichment(roster_id, LEAGUE_ID, BASE_URL)
+    return await fetch_roster_with_enrichment(
+        roster_id, resolve_league_id(league_id), BASE_URL
+    )
 
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_users() -> List[Dict[str, Any]]:
-    """Get all users (team owners) participating in the Token Bowl league.
+async def get_league_users(league_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Get all users (team owners) participating in a fantasy football league.
+
+    Args:
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns user information including:
     - User ID and username
@@ -206,19 +350,24 @@ async def get_league_users() -> List[Dict[str, Any]]:
     """
     from lib.league_tools import fetch_league_users
 
-    return await fetch_league_users(LEAGUE_ID, BASE_URL)
+    return await fetch_league_users(resolve_league_id(league_id), BASE_URL)
 
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_matchups(week: int) -> List[Dict[str, Any]]:
-    """Get head-to-head matchups for a specific week in the Token Bowl league.
+async def get_league_matchups(
+    week: int, league_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get head-to-head matchups for a specific week in a fantasy football league.
 
     Args:
         week: The NFL week number (1-18 for regular season + playoffs).
               Can be an integer or string (will be converted).
               Week 1-14 are typically regular season,
               Week 15-17/18 are typically playoffs.
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns matchup information including:
     - Roster IDs for competing teams
@@ -244,13 +393,15 @@ async def get_league_matchups(week: int) -> List[Dict[str, Any]]:
             )
         ]
 
-    return await fetch_league_matchups(LEAGUE_ID, week, BASE_URL)
+    return await fetch_league_matchups(resolve_league_id(league_id), week, BASE_URL)
 
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_transactions(round: int = 1) -> List[Dict[str, Any]]:
-    """Get waiver wire and trade transactions for the Token Bowl league.
+async def get_league_transactions(
+    round: int = 1, league_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get waiver wire and trade transactions for a fantasy football league.
 
     Args:
         round: The transaction round/week number (default: 1).
@@ -258,6 +409,9 @@ async def get_league_transactions(round: int = 1) -> List[Dict[str, Any]]:
                Must be positive (1 or greater).
                Transactions are grouped by processing rounds.
                Higher rounds represent more recent transactions.
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns transaction details including:
     - Transaction type (waiver, free_agent, trade)
@@ -298,7 +452,9 @@ async def get_league_transactions(round: int = 1) -> List[Dict[str, Any]]:
             }
         ]
 
-    return await fetch_league_transactions(LEAGUE_ID, round, BASE_URL)
+    return await fetch_league_transactions(
+        resolve_league_id(league_id), round, BASE_URL
+    )
 
 
 @mcp.tool()
@@ -311,6 +467,7 @@ async def get_recent_transactions(
     min_days_ago: Optional[int] = None,
     max_days_ago: Optional[int] = None,
     include_player_details: bool = False,
+    league_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Get the most recent transactions, sorted by most recent first.
 
@@ -324,6 +481,9 @@ async def get_recent_transactions(
         min_days_ago: Minimum days ago for transactions (default: None).
         max_days_ago: Maximum days ago for transactions (default: None).
         include_player_details: Include full player details (default: False, minimal data).
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns a consolidated list of recent transactions including:
     - The most recent transactions (up to 20)
@@ -407,6 +567,8 @@ async def get_recent_transactions(
                 }
             ]
 
+    resolved_league_id = resolve_league_id(league_id)
+
     # Fetch transactions from the last 10 rounds to ensure we have enough
     all_transactions = []
 
@@ -415,7 +577,9 @@ async def get_recent_transactions(
         tasks = []
         for round_num in range(1, 11):  # Get rounds 1-10
             tasks.append(
-                client.get(f"{BASE_URL}/league/{LEAGUE_ID}/transactions/{round_num}")
+                client.get(
+                    f"{BASE_URL}/league/{resolved_league_id}/transactions/{round_num}"
+                )
             )
 
         responses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -517,8 +681,15 @@ async def get_recent_transactions(
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_traded_picks() -> List[Dict[str, Any]]:
-    """Get all future draft picks that have been traded in the Token Bowl league.
+async def get_league_traded_picks(
+    league_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get all future draft picks that have been traded in a fantasy football league.
+
+    Args:
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns information about traded picks including:
     - Season and round of the pick
@@ -533,13 +704,18 @@ async def get_league_traded_picks() -> List[Dict[str, Any]]:
     """
     from lib.league_tools import fetch_league_traded_picks
 
-    return await fetch_league_traded_picks(LEAGUE_ID, BASE_URL)
+    return await fetch_league_traded_picks(resolve_league_id(league_id), BASE_URL)
 
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_drafts() -> List[Dict[str, Any]]:
-    """Get all draft information for the Token Bowl league.
+async def get_league_drafts(league_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Get all draft information for a fantasy football league.
+
+    Args:
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns draft details including:
     - Draft ID and type (snake, auction, linear)
@@ -555,13 +731,20 @@ async def get_league_drafts() -> List[Dict[str, Any]]:
     """
     from lib.league_tools import fetch_league_drafts
 
-    return await fetch_league_drafts(LEAGUE_ID, BASE_URL)
+    return await fetch_league_drafts(resolve_league_id(league_id), BASE_URL)
 
 
 @mcp.tool()
 @log_mcp_tool
-async def get_league_winners_bracket() -> List[Dict[str, Any]]:
-    """Get the playoff winners bracket for the Token Bowl league championship.
+async def get_league_winners_bracket(
+    league_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get the playoff winners bracket for a fantasy football league championship.
+
+    Args:
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns playoff bracket information including:
     - Round number (1 = first round, increases each week)
@@ -577,7 +760,7 @@ async def get_league_winners_bracket() -> List[Dict[str, Any]]:
     """
     from lib.league_tools import fetch_league_winners_bracket
 
-    return await fetch_league_winners_bracket(LEAGUE_ID, BASE_URL)
+    return await fetch_league_winners_bracket(resolve_league_id(league_id), BASE_URL)
 
 
 @mcp.tool()
@@ -1190,11 +1373,12 @@ async def get_waiver_wire_players(
     include_stats: bool = False,
     highlight_recent_drops: bool = True,
     verify_availability: bool = True,
+    league_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get NFL players available on the waiver wire (not on any team roster).
 
     This tool identifies free agents by comparing all NFL players against
-    currently rostered players in the Token Bowl league.
+    currently rostered players in a fantasy football league.
 
     Args:
         position: Filter by position. Valid values: QB, RB, WR, TE, DEF, K.
@@ -1212,6 +1396,10 @@ async def get_waiver_wire_players(
         highlight_recent_drops: Mark players dropped in last 7 days (default: True).
 
         verify_availability: Double-check roster status (default: True).
+
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns waiver wire data including:
     - Total available players count
@@ -1258,11 +1446,15 @@ async def get_waiver_wire_players(
             if not search_term:
                 search_term = None  # Treat empty string as None
 
+        resolved_league_id = resolve_league_id(league_id)
+
         # Get all current rosters to find rostered players (if verify_availability is True)
         rostered_players = set()
         if verify_availability:
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{BASE_URL}/league/{LEAGUE_ID}/rosters")
+                response = await client.get(
+                    f"{BASE_URL}/league/{resolved_league_id}/rosters"
+                )
                 response.raise_for_status()
                 rosters = response.json()
 
@@ -1288,7 +1480,10 @@ async def get_waiver_wire_players(
         )
         recent_drops = (
             await get_recent_drops_set(
-                get_recent_transactions.fn, days_back=7, limit=50
+                get_recent_transactions.fn,
+                days_back=7,
+                limit=50,
+                league_id=resolved_league_id,
             )
             if highlight_recent_drops
             else set()
@@ -1393,6 +1588,7 @@ async def get_waiver_analysis(
     position: Optional[str] = None,
     days_back: int = 7,
     limit: int = 20,
+    league_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get comprehensive waiver wire analysis with minimal context usage.
 
@@ -1406,6 +1602,9 @@ async def get_waiver_analysis(
                   Can be integer or string. Valid range: 1-30.
         limit: Maximum number of players to return per category (default: 20).
               Can be integer or string. Maximum: 50.
+        league_id: Optional Sleeper league ID, or a friendly name configured
+                   via the SLEEPER_LEAGUES env var (e.g. "tejas"). Defaults
+                   to the SLEEPER_LEAGUE_ID env var (Token Bowl) when omitted.
 
     Returns comprehensive analysis including:
     - recently_dropped: Players dropped in our league (last N days) who are valuable
@@ -1451,6 +1650,8 @@ async def get_waiver_analysis(
                 value_received=str(limit)[:100],
                 expected="integer between 1 and 50",
             )
+        resolved_league_id = resolve_league_id(league_id)
+
         logger.info(
             f"Starting waiver analysis for position={position}, days_back={days_back}"
         )
@@ -1458,7 +1659,9 @@ async def get_waiver_analysis(
         # Get current rosters to determine position needs and waiver priority
         rosters_data = {}
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{BASE_URL}/league/{LEAGUE_ID}/rosters")
+            response = await client.get(
+                f"{BASE_URL}/league/{resolved_league_id}/rosters"
+            )
             response.raise_for_status()
             rosters = response.json()
 
@@ -1479,6 +1682,7 @@ async def get_waiver_analysis(
                 max_days_ago=days_back,
                 include_player_details=False,
                 limit=50,
+                league_id=resolved_league_id,
             )
 
             # Collect unique recently dropped players
@@ -1543,6 +1747,7 @@ async def get_waiver_analysis(
             include_stats=False,  # Minimal data mode
             highlight_recent_drops=True,
             verify_availability=True,
+            league_id=resolved_league_id,
         )
 
         # Separate trending available players
@@ -2400,6 +2605,7 @@ async def health_check() -> Dict[str, Any]:
         "components": {},
         "server_info": {
             "league_id": LEAGUE_ID,
+            "configured_leagues": sorted(LEAGUE_NAME_MAP),
             "debug_mode": DEBUG_MODE,
         },
     }

@@ -12,4 +12,6 @@ services:
         value: "3.13"
       - key: SLEEPER_LEAGUE_ID
         value: "1315471209655181312"
+      - key: SLEEPER_LEAGUES
+        sync: false
     autoDeploy: true

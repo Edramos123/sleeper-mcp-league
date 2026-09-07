@@ -69,7 +69,8 @@ cp .env.example .env
 ### Environment Variables
 These are located in .env
 - `FFNERD_API_KEY`: Fantasy Nerds API key for extended analytics
-- `SLEEPER_LEAGUE_ID`: Sleeper league ID (defaults to Token Bowl: 1266471057523490816)
+- `SLEEPER_LEAGUE_ID`: Default Sleeper league ID, used when a tool call omits its optional `league_id` argument (defaults to Token Bowl: 1266471057523490816)
+- `SLEEPER_LEAGUES`: Optional JSON object mapping friendly names to Sleeper league IDs (e.g. `{"tejas": "...", "work": "..."}`), so tool calls can pass a name instead of a raw ID. See `list_configured_leagues`.
 - `REDIS_URL`: Redis connection URL (defaults to redis://localhost:6379)
 wy
 ### GitHub

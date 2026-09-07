@@ -13,7 +13,7 @@ All enrichment functions are designed to:
 """
 
 import logging
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +300,10 @@ async def get_trending_data_map(
 
 
 async def get_recent_drops_set(
-    get_recent_transactions_fn, days_back: int = 7, limit: int = 50
+    get_recent_transactions_fn,
+    days_back: int = 7,
+    limit: int = 50,
+    league_id: Optional[str] = None,
 ) -> Set[str]:
     """Fetch recently dropped players and return as a set of player_ids.
 
@@ -308,6 +311,8 @@ async def get_recent_drops_set(
         get_recent_transactions_fn: The get_recent_transactions function to call
         days_back: Number of days to look back
         limit: Maximum number of transactions to fetch
+        league_id: Optional resolved Sleeper league ID to scope the lookup to
+                   (passed through to get_recent_transactions_fn)
 
     Returns:
         Set of player IDs that were recently dropped
@@ -319,6 +324,7 @@ async def get_recent_drops_set(
             max_days_ago=days_back,
             include_player_details=False,
             limit=limit,
+            league_id=league_id,
         )
         # Extract player IDs from drops
         for txn in recent_txns:
