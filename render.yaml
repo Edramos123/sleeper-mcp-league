@@ -12,8 +12,8 @@ services:
         value: "3.13"
       - key: SLEEPER_LEAGUE_ID
         value: "1315471209655181312"
-      - key: SLEEPER_LEAGUES
-        sync: false
       - key: SLEEPER_USER_ID
-        sync: false
+        value: "1047750466941300736"
+      - key: SLEEPER_LEAGUES
+        value: '{"degenerate":"1389884072729260032","chopdeez":"1389693534050721792","replacements":"1382500594995953664","tejas":"1315471209655181312"}'
     autoDeploy: true
