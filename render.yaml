@@ -2,6 +2,7 @@ services:
   - type: web
     name: sleeper-mcp
     runtime: python
+    plan: free
     buildCommand: "pip install uv && uv sync"
     startCommand: "uv run python build_cache.py; uv run python sleeper_mcp.py http"
     envVars:
