@@ -12,6 +12,7 @@ free-tier deployment this project targets.
 import os
 import time
 import logging
+import threading
 from typing import Any, Optional
 
 import redis
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 _memory_store: dict[str, tuple[Any, Optional[float]]] = {}
 
 _selected_client = None
+_selection_lock = threading.Lock()
 
 
 class InMemoryCache:
@@ -76,18 +78,26 @@ def get_cache_client():
     """Return a cache client: real Redis if reachable, else an in-memory fallback.
 
     The choice is made once per process and cached, so we don't re-probe
-    Redis (and pay its connection timeout) on every cache access.
+    Redis (and pay its connection timeout) on every cache access. Callers
+    may hit this concurrently from a thread pool (e.g. parallel projections
+    fetches), so the first-time selection is guarded by a lock.
     """
     global _selected_client
     if _selected_client is not None:
         return _selected_client
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-    client = redis.from_url(redis_url, decode_responses=False, socket_connect_timeout=2)
+    with _selection_lock:
+        if _selected_client is not None:
+            return _selected_client
 
-    if _redis_reachable(client):
-        _selected_client = client
-    else:
-        _selected_client = InMemoryCache()
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        client = redis.from_url(
+            redis_url, decode_responses=False, socket_connect_timeout=2
+        )
+
+        if _redis_reachable(client):
+            _selected_client = client
+        else:
+            _selected_client = InMemoryCache()
 
     return _selected_client

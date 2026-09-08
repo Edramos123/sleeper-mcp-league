@@ -16,6 +16,7 @@ from cache_client import (
     get_players_from_cache,
     spot_refresh_player_stats,
 )
+from sleeper_projections_client import overlay_projections
 from lib.enrichment import enrich_player_full, organize_roster_by_position
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,14 @@ async def fetch_roster_with_enrichment(
                 f"Spot refreshing stats for roster players (count={len(player_ids_set)}, roster_id={roster_id})"
             )
             spot_refresh_player_stats(player_ids_set)
+
+        # Fill in projected/actual/ros_projected wherever the player cache
+        # (built from Sleeper + Fantasy Nerds) left them null, using Sleeper's
+        # own undocumented projections API - only overlays missing data, never
+        # overwrites values the cache already had.
+        overlay_projections(
+            all_players, player_ids_set, str(current_season), current_week
+        )
 
         # Track totals for meta information
         total_projected = 0.0

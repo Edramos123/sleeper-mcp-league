@@ -1559,6 +1559,29 @@ async def get_waiver_wire_players(
                 players=[],
             )
 
+        # Fill in projected/ros_projected wherever the player cache left them
+        # null, using Sleeper's own undocumented projections API, so waiver
+        # candidates can actually be ranked by projection instead of just listed.
+        try:
+            from sleeper_projections_client import overlay_projections
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                state_response = await client.get(f"{BASE_URL}/state/nfl")
+                state_response.raise_for_status()
+                state = state_response.json()
+
+            overlay_projections(
+                all_players,
+                all_players.keys(),
+                str(state.get("season", "")),
+                state.get("week", 1),
+            )
+        except Exception as e:
+            logger.warning(
+                f"Sleeper projections overlay failed for waiver wire, continuing "
+                f"without it (error_type={type(e).__name__}, error_message={str(e)})"
+            )
+
         # Fetch trending data and recent drops using utility functions
         trending_data = await get_trending_data_map(
             get_trending_players.fn, txn_type="add"
