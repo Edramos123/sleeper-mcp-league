@@ -1560,8 +1560,9 @@ async def get_waiver_wire_players(
             )
 
         # Fill in projected/ros_projected wherever the player cache left them
-        # null, using Sleeper's own undocumented projections API, so waiver
-        # candidates can actually be ranked by projection instead of just listed.
+        # null, using Sleeper's own undocumented projections API scored
+        # against this league's actual scoring_settings, so waiver candidates
+        # can be ranked by league-accurate projection instead of just listed.
         try:
             from sleeper_projections_client import overlay_projections
 
@@ -1575,6 +1576,8 @@ async def get_waiver_wire_players(
                 all_players.keys(),
                 str(state.get("season", "")),
                 state.get("week", 1),
+                resolved_league_id,
+                BASE_URL,
             )
         except Exception as e:
             logger.warning(

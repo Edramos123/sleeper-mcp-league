@@ -157,10 +157,16 @@ async def fetch_roster_with_enrichment(
 
         # Fill in projected/actual/ros_projected wherever the player cache
         # (built from Sleeper + Fantasy Nerds) left them null, using Sleeper's
-        # own undocumented projections API - only overlays missing data, never
-        # overwrites values the cache already had.
+        # own undocumented projections API scored against this league's actual
+        # scoring_settings - only overlays missing data, never overwrites
+        # values the cache already had.
         overlay_projections(
-            all_players, player_ids_set, str(current_season), current_week
+            all_players,
+            player_ids_set,
+            str(current_season),
+            current_week,
+            league_id,
+            base_url,
         )
 
         # Track totals for meta information

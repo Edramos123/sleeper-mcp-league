@@ -73,20 +73,24 @@ def enrich_player_stats(
 
     cached_stats = player_data["stats"]
 
-    # Add projected stats
+    # Add projected stats. fantasy_points_low/high are only included when the
+    # source actually provided a real range (e.g. Fantasy Nerds) - they are
+    # never fabricated by copying fantasy_points into both, since an
+    # identical low/high/mid is misleading rather than informative.
     if cached_stats.get("projected"):
         proj = cached_stats["projected"]
         fantasy_points = proj.get("fantasy_points", 0)
 
-        player_stats["projected"] = {
-            "fantasy_points": round(fantasy_points, 2),
-            "fantasy_points_low": round(
-                proj.get("fantasy_points_low", fantasy_points), 2
-            ),
-            "fantasy_points_high": round(
-                proj.get("fantasy_points_high", fantasy_points), 2
-            ),
-        }
+        projected_out = {"fantasy_points": round(fantasy_points, 2)}
+        if proj.get("fantasy_points_generic") is not None:
+            projected_out["fantasy_points_generic"] = round(
+                proj["fantasy_points_generic"], 2
+            )
+        if proj.get("fantasy_points_low") is not None:
+            projected_out["fantasy_points_low"] = round(proj["fantasy_points_low"], 2)
+        if proj.get("fantasy_points_high") is not None:
+            projected_out["fantasy_points_high"] = round(proj["fantasy_points_high"], 2)
+        player_stats["projected"] = projected_out
 
     # Add ROS projected stats
     if cached_stats.get("ros_projected"):
@@ -95,6 +99,10 @@ def enrich_player_stats(
             "fantasy_points": round(ros.get("fantasy_points", 0), 2),
             "season": ros.get("season"),
         }
+        if ros.get("fantasy_points_generic") is not None:
+            player_stats["ros_projected"]["fantasy_points_generic"] = round(
+                ros["fantasy_points_generic"], 2
+            )
 
         # Add position-specific ROS stats if requested
         if include_position_stats:
@@ -132,11 +140,16 @@ def enrich_player_stats(
     # Add actual stats if game has been played
     if cached_stats.get("actual"):
         actual = cached_stats["actual"]
-        player_stats["actual"] = {
+        actual_out = {
             "fantasy_points": round(actual.get("fantasy_points", 0), 2),
             "game_status": actual.get("game_status", "unknown"),
             "game_stats": actual.get("game_stats"),
         }
+        if actual.get("fantasy_points_generic") is not None:
+            actual_out["fantasy_points_generic"] = round(
+                actual["fantasy_points_generic"], 2
+            )
+        player_stats["actual"] = actual_out
 
     return player_stats
 
@@ -248,10 +261,17 @@ def enrich_player_minimal(
     # Add projected points if available
     # Check new location first (stats.projected.fantasy_points)
     if "stats" in player_data and player_data["stats"].get("projected"):
+        projected = player_data["stats"]["projected"]
         try:
-            fantasy_points = player_data["stats"]["projected"].get("fantasy_points")
+            fantasy_points = projected.get("fantasy_points")
             if fantasy_points is not None:
                 minimal_data["projected_points"] = float(fantasy_points)
+        except (ValueError, TypeError):
+            pass
+        try:
+            generic_points = projected.get("fantasy_points_generic")
+            if generic_points is not None:
+                minimal_data["projected_points_generic"] = float(generic_points)
         except (ValueError, TypeError):
             pass
     # Fall back to old location for backward compatibility
@@ -265,10 +285,17 @@ def enrich_player_minimal(
 
     # Add ROS projected points if available
     if "stats" in player_data and player_data["stats"].get("ros_projected"):
+        ros_projected = player_data["stats"]["ros_projected"]
         try:
-            ros_points = player_data["stats"]["ros_projected"].get("fantasy_points")
+            ros_points = ros_projected.get("fantasy_points")
             if ros_points is not None:
                 minimal_data["ros_projected_points"] = float(ros_points)
+        except (ValueError, TypeError):
+            pass
+        try:
+            ros_generic_points = ros_projected.get("fantasy_points_generic")
+            if ros_generic_points is not None:
+                minimal_data["ros_projected_points_generic"] = float(ros_generic_points)
         except (ValueError, TypeError):
             pass
 
