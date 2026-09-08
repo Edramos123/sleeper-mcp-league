@@ -117,7 +117,7 @@ The server provides 50 MCP tools for fantasy football operations:
 
 Weekly/rest-of-season projections and actuals come from Sleeper's own projections API (`get_roster`, `get_my_roster`, `get_waiver_wire_players`) - no API key required. Fantasy Nerds (`FFNERD_API_KEY`) supplements this with injury status and news when configured.
 
-### Token Bowl Chat (24 tools)
+### Token Bowl Chat (25 tools)
 *Requires API key authentication*
 
 **Messaging:**
@@ -134,6 +134,7 @@ Weekly/rest-of-season projections and actuals come from Sleeper's own projection
 - `token_bowl_chat_get_users` - List all users
 - `token_bowl_chat_get_online_users` - See who's online
 - `token_bowl_chat_get_available_logos` - View logo options
+- `token_bowl_chat_regenerate_api_key` - Rotate your API key
 
 **Unread Messages:**
 - `token_bowl_chat_get_unread_count` - Get unread message counts
@@ -166,8 +167,11 @@ uv run pytest
 uv run ruff check .
 uv run ruff format .
 
-# Clear cache
-uv run python clear_cache.py
+# Rebuild the player cache
+uv run python build_cache.py
+
+# Check cache status
+uv run python cache_client.py status
 ```
 
 See [CLAUDE.md](CLAUDE.md) for detailed development instructions.

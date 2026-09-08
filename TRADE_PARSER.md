@@ -30,16 +30,16 @@ A Python script that uses the Claude SDK to automatically extract player names f
 
 ```bash
 # Basic usage
-uv run python parse_trade_proposal.py "I'll trade you Tyreek Hill for Justin Jefferson"
+uv run python scripts/parse_trade_proposal.py "I'll trade you Tyreek Hill for Justin Jefferson"
 
 # With explicit API key
-uv run python parse_trade_proposal.py --api-key sk-ant-... "Trade proposal text"
+uv run python scripts/parse_trade_proposal.py --api-key sk-ant-... "Trade proposal text"
 ```
 
 ### Python Script
 
 ```python
-from parse_trade_proposal import parse_trade_proposal
+from scripts.parse_trade_proposal import parse_trade_proposal
 from anthropic import Anthropic
 
 client = Anthropic()  # Uses ANTHROPIC_API_KEY from environment
@@ -50,12 +50,13 @@ print(f"Receive: {players_to_receive}")
 print(f"Give: {players_to_give}")
 ```
 
-## Examples
+### Related: extract_trade_proposal.py
 
-Run the example script to see various trade proposals:
-```bash
-uv run python example_trade_parse.py
-```
+`scripts/extract_trade_proposal.py` builds on the same idea but resolves
+names to Sleeper player IDs and validates them against actual team rosters
+in `SLEEPER_LEAGUE_ID`, instead of returning free-text player names.
+
+## Examples
 
 ### Sample Trade Proposals
 

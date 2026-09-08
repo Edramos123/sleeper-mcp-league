@@ -9,6 +9,17 @@
 ✅ Consolidated all scratchpads into `scratchpads/` directory
 ✅ Updated README tagline for Token Bowl community
 
+## Completed Since (multi-league support work)
+✅ Modularized `sleeper_mcp.py` business logic into `lib/` (`validation.py`,
+   `decorators.py`, `enrichment.py`, `league_tools.py`) - not the `tools/`
+   split originally proposed below, but the same goal achieved
+✅ Added graceful degradation when Fantasy Nerds is unavailable (missing/invalid
+   `FFNERD_API_KEY` no longer breaks the cache build or leaves it silently empty)
+✅ `health_check` tool verifies Redis/cache and Sleeper API status
+✅ Response-shape validation with diagnostic logging on the Sleeper/Fantasy Nerds
+   fetches in `build_cache.py`, so a malformed response is diagnosable instead of
+   crashing the cache build with an opaque `AttributeError`
+
 ## Additional Recommendations for Future Improvements
 
 ### 1. Documentation Structure
@@ -18,17 +29,12 @@
   - Add CONTRIBUTING.md with development guidelines
 
 ### 2. Code Organization
-- **Modularize sleeper_mcp.py** - Currently 800+ lines, could be split into:
-  - `tools/league.py` - League-related tools
-  - `tools/player.py` - Player search and data tools
-  - `tools/user.py` - User profile tools
-  - `tools/draft.py` - Draft-related tools
-  - Keep main server logic in `sleeper_mcp.py`
-
-- **Consolidate cache functionality**:
-  - Merge `build_cache.py` functionality into `cache_client.py`
-  - Create single entry point for all cache operations
-  - Remove duplicate code between files
+- ~~**Consolidate cache functionality**: Merge `build_cache.py` into
+  `cache_client.py`~~ - superseded: the cache layer went the other way on
+  purpose. It's now `cache_client.py` (read path) + `build_cache.py` (build
+  path) + `cache_backend.py` (Redis-or-in-memory backend selection) +
+  `sleeper_projections_client.py` (separately-cached projections/actuals).
+  Each has one clear job; merging them back would just make one big file.
 
 ### 3. Testing Improvements
 - **Add test coverage for utility scripts** in scripts/
@@ -47,8 +53,8 @@
   format:
       uv run ruff format .
 
-  cache-clear:
-      uv run python scripts/clear_cache.py
+  cache-refresh:
+      uv run python build_cache.py
   ```
 
 - **Improve .gitignore**:
@@ -68,10 +74,8 @@
 ### 6. Logging and Monitoring
 - **Standardize logging** across all modules
 - **Add structured logging** for production debugging
-- **Create health check endpoint** that verifies:
-  - Redis connection
-  - Sleeper API availability
-  - Fantasy Nerds API (if configured)
+- ~~Create health check endpoint that verifies Redis/Sleeper/Fantasy Nerds~~
+  ✅ done - the `health_check` MCP tool covers this (no separate HTTP route)
 
 ### 7. Data Management
 - **Archive old weekly data** - Move past weeks' picks/slopups to an archive/
@@ -91,13 +95,13 @@
 ### 10. Error Handling
 - **Add retry logic** for transient API failures
 - **Improve error messages** with actionable suggestions
-- **Add graceful degradation** when Fantasy Nerds is unavailable
+- ~~Add graceful degradation when Fantasy Nerds is unavailable~~ ✅ done - see "Completed Since" above
 
 ## Priority Order
 
 1. **High Priority** (Do soon):
-   - Modularize sleeper_mcp.py for maintainability
-   - Consolidate cache functionality
+   - ~~Modularize sleeper_mcp.py for maintainability~~ ✅ done, see above
+   - ~~Consolidate cache functionality~~ superseded, see above
    - Add Makefile for developer convenience
 
 2. **Medium Priority** (Nice to have):
